@@ -1,68 +1,182 @@
-import { BigInt } from "@graphprotocol/graph-ts"
+import { Lordless, Transfer, Approval, MinterAdded, MinterRemoved } from "../generated/Lordless/Lordless";
+
+import { BigDecimal, BigInt } from "@graphprotocol/graph-ts";
+
 import {
-  Lordless,
-  MinterAdded,
-  MinterRemoved,
-  Transfer,
-  Approval
-} from "../generated/Lordless/Lordless"
-import { ExampleEntity } from "../generated/schema"
+  Transfer as TransferEntity,
+  _Approval as ApprovalEntity,
+  Minter,
+	Balance,
+  Token,
+	TokenSupply,
+	_LastTokenSupply,
+} from "../generated/schema";
 
 export function handleMinterAdded(event: MinterAdded): void {
-  // Entities can be loaded from the store using a string ID; this ID
-  // needs to be unique across all entities of the same type
-  let entity = ExampleEntity.load(event.transaction.from.toHex())
+  let entity = Minter.load(event.params.account.toHex())
 
-  // Entities only exist after they have been saved to the store;
-  // `null` checks allow to create entities on demand
   if (entity == null) {
-    entity = new ExampleEntity(event.transaction.from.toHex())
-
-    // Entity fields can be set using simple assignments
-    entity.count = BigInt.fromI32(0)
+    entity = new Minter(event.params.account.toHex())
   }
 
-  // BigInt and BigDecimal math are supported
-  entity.count = entity.count + BigInt.fromI32(1)
-
-  // Entity fields can be set based on event parameters
-  entity.account = event.params.account
-
-  // Entities can be written to the store with `.save()`
   entity.save()
-
-  // Note: If a handler doesn't require existing field values, it is faster
-  // _not_ to load the entity from the store. Instead, create it fresh with
-  // `new Entity(...)`, set the fields that should be updated and save the
-  // entity back to the store. Fields that were not set or unset remain
-  // unchanged, allowing for partial updates to be applied.
-
-  // It is also possible to access smart contracts from mappings. For
-  // example, the contract that has emitted the event can be connected to
-  // with:
-  //
-  // let contract = Contract.bind(event.address)
-  //
-  // The following functions can then be called on this contract to access
-  // state variables and other data:
-  //
-  // - contract.name(...)
-  // - contract.approve(...)
-  // - contract.totalSupply(...)
-  // - contract.transferFrom(...)
-  // - contract.decimals(...)
-  // - contract.increaseAllowance(...)
-  // - contract.mint(...)
-  // - contract.balanceOf(...)
-  // - contract.symbol(...)
-  // - contract.decreaseAllowance(...)
-  // - contract.transfer(...)
-  // - contract.isMinter(...)
-  // - contract.allowance(...)
 }
 
-export function handleMinterRemoved(event: MinterRemoved): void {}
+export function handleApproval(event: Approval): void {
+  let entity = ApprovalEntity.load(event.params.owner.toHex())
 
-export function handleTransfer(event: Transfer): void {}
+  if (entity == null) {
+    entity = new ApprovalEntity(event.params.owner.toHex())
+  }
 
-export function handleApproval(event: Approval): void {}
+  entity.owner = event.params.owner
+  entity.spender = event.params.spender
+  entity.value = event.params.value
+  entity.save()
+}
+
+function initToken(
+	tokenId: string,
+	tokenSupplyId: string,
+	totalSupplyVal: BigDecimal,
+	event: Transfer,
+	token: Token | null
+): void {
+	token = new Token(tokenId);
+	token.save();
+	let prevTokenSupply = new _LastTokenSupply(tokenId);
+	saveTokenSupply(
+		tokenSupplyId,
+		totalSupplyVal,
+		event,
+		token,
+		prevTokenSupply
+	);
+}
+
+function initBalance(address: string): void {
+	let balance = Balance.load(address);
+	if (balance === null && !address.startsWith("0x000000")) {
+		balance = new Balance(address);
+		balance.amount = BigDecimal.fromString("0");
+		balance.save();
+	}
+}
+
+function saveTokenSupply(
+	tokenSupplyId: string,
+	totalSupplyVal: BigDecimal,
+	event: Transfer,
+	token: Token | null,
+	prevTokenSupply: _LastTokenSupply | null
+): void {
+	// record totalSupply changes
+	let tokenSupply = new TokenSupply(tokenSupplyId);
+	tokenSupply.totalSupply = totalSupplyVal;
+	tokenSupply.timestamp = event.block.timestamp;
+	tokenSupply.token = token.id;
+	tokenSupply.save();
+	prevTokenSupply.totalSupply = totalSupplyVal;
+	prevTokenSupply.save();
+}
+
+function saveTransaction(
+	transferId: string,
+	fromAddress: string,
+	toAddress: string,
+	transferAmount: BigDecimal,
+	timestamp: BigInt
+): void {
+	let transfer = new TransferEntity(transferId);
+	transfer.from = fromAddress;
+	transfer.to = toAddress;
+	transfer.amount = transferAmount;
+	transfer.timestamp = timestamp;
+
+	transfer.save();
+}
+
+function saveBalance(
+	fromAddress: string,
+	toAddress: string,
+	transferAmount: BigDecimal
+): void {
+	initBalance(fromAddress);
+	initBalance(toAddress);
+
+	let fromBalance = Balance.load(fromAddress);
+	let toBalance = Balance.load(toAddress);
+
+	if (fromBalance !== null) {
+		fromBalance.amount = fromBalance.amount.minus(transferAmount);
+		fromBalance.save();
+	}
+	if (toBalance !== null) {
+		toBalance.amount = toBalance.amount.plus(transferAmount);
+		toBalance.save();
+	}
+}
+
+export function handleTransfer(event: Transfer): void {
+	let contract = Lordless.bind(event.address);
+	let totalSupplyVal: BigDecimal;
+	let tokenId = event.address.toHex();
+	let fromAddress = event.params.from.toHex();
+	let toAddress = event.params.to.toHex();
+
+	let totalSupply = contract.totalSupply();
+	let decimals = contract.decimals();
+	let decimalsTotal = toDecimalExponent(BigInt.fromI32(decimals));
+	let decimalTotalSupply = convertToDecimal(totalSupply, decimalsTotal);
+	totalSupplyVal = decimalTotalSupply;
+	let transferAmount = convertToDecimal(event.params.value, decimalsTotal);
+	let timestamp = event.block.timestamp;
+
+	let token = Token.load(tokenId);
+	let transferId = event.transaction.hash.toHex();
+
+	if (!token) {
+		initToken(tokenId, transferId, totalSupplyVal, event, token);
+	} else {
+		let prevTokenSupply = _LastTokenSupply.load(tokenId);
+
+		if (prevTokenSupply.totalSupply != totalSupplyVal) {
+			saveTokenSupply(
+				transferId,
+				totalSupplyVal,
+				event,
+				token,
+				prevTokenSupply
+			);
+		}
+	}
+
+	saveTransaction(
+		transferId,
+		fromAddress,
+		toAddress,
+		transferAmount,
+		timestamp
+	);
+
+	saveBalance(fromAddress, toAddress, transferAmount);
+}
+
+function toDecimalExponent(decimals: BigInt): BigInt {
+	let decimalTotal = BigInt.fromI32(10);
+	for (
+		let i = BigInt.fromI32(1);
+		i.lt(decimals);
+		i = i.plus(BigInt.fromI32(1))
+	) {
+		decimalTotal = decimalTotal.times(BigInt.fromI32(10));
+	}
+	return decimalTotal;
+}
+
+function convertToDecimal(
+	amount: BigInt,
+	decimalTotal: BigInt
+): BigDecimal {
+	return amount.toBigDecimal().div(decimalTotal.toBigDecimal());
+}

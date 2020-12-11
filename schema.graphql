@@ -1,5 +1,40 @@
-type ExampleEntity @entity {
+type Minter @entity {
   id: ID!
-  count: BigInt!
-  account: Bytes! # address
+}
+
+type Balance @entity {
+	id: ID!
+	amount: BigDecimal!
+}
+
+type Token @entity {
+	id: ID!
+	tokenSupplies: [TokenSupply!]! @derivedFrom(field: "token")
+}
+
+type Transfer @entity {
+	id: ID!
+	from: String!
+	to: String!
+	amount: BigDecimal!
+	timestamp: BigInt!
+}
+
+type TokenSupply @entity {
+	id: ID!
+	totalSupply: BigDecimal!
+	timestamp: BigInt!
+	token: Token!
+}
+
+type _LastTokenSupply @entity {
+	id: ID!
+	totalSupply: BigDecimal!
+}
+
+type _Approval @entity {
+  id: ID!
+  owner: Bytes! # address
+  spender: Bytes! # address
+  value: BigInt!
 }
